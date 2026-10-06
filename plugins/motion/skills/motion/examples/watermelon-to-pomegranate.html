@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Watermelon to Pomegranate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@500;600&display=block" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#0b0f0d;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  canvas{height:96vh;width:auto;box-shadow:0 20px 60px rgba(0,0,0,.5);border-radius:12px}
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+const W = 1080, H = 1920, FPS = 30, DUR = 14;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const TAU = Math.PI * 2;
+const SERIF = "'Instrument Serif', serif", SANS = "'Inter', sans-serif";
+
+// ---------- easing / timing ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const P = (t, s, d) => clamp((t - s) / d);
+const lerp = (a, b, k) => a + (b - a) * k;
+const lerp3 = (a, b, k) => a.map((v, i) => Math.round(lerp(v, b[i], k)));
+const eOut3 = x => 1 - Math.pow(1 - x, 3);
+const eOut5 = x => 1 - Math.pow(1 - x, 5);
+const eInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const eInOut2 = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+const eBack = (x, s = 1.7) => x <= 0 ? 0 : x >= 1 ? 1 : 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------- prebuilt textures ----------
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+{ const g = grain.getContext('2d'), id = g.createImageData(256, 256), r = rng(7);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0); }
+function sprite(r, g, b) {
+  const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, `rgba(${r},${g},${b},1)`); gr.addColorStop(.12, `rgba(${r},${g},${b},.75)`);
+  gr.addColorStop(.35, `rgba(${r},${g},${b},.18)`); gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return c;
+}
+const SPR_MINT = sprite(120, 245, 185), SPR_LIME = sprite(220, 255, 120), SPR_WHITE = sprite(255, 250, 235),
+      SPR_RUBY = sprite(255, 70, 100), SPR_CORAL = sprite(255, 120, 130);
+function glow(spr, x, y, size, a) { if (a <= 0) return; ctx.globalAlpha = a; ctx.drawImage(spr, x - size / 2, y - size / 2, size, size); ctx.globalAlpha = 1; }
+
+// ---------- timeline ----------
+const T = {
+  converge: 2.3,      // rings collapse into the watermelon
+  morph: 6.1,         // watermelon shrinks into a pomegranate
+  morphLen: 2.4,
+  bloom: 10.15,       // flash into the light scene
+};
+
+// ---------- scene data ----------
+const C0 = { x: 540, y: 1000 };
+const R0 = 360, R1 = 122;
+const RINGS = [
+  { x: 540, y: -230, r: 990, a0: 1.1, sp: .35, dot: 1.85 },
+  { x: 540, y: 2230, r: 990, a0: -2.0, sp: -.3, dot: -1.2 },
+  { x: -700, y: 1000, r: 1000, a0: -.4, sp: .28, dot: .22 },
+  { x: 1780, y: 1000, r: 1000, a0: 2.6, sp: -.33, dot: 3.4 },
+];
+const N = 64;
+// energy specks: loose and scattered in the watermelon...
+const PARTS = (() => { const r = rng(42), a = [];
+  for (let i = 0; i < N; i++) { const d = Math.sqrt(r()) * .8, an = r() * TAU;
+    a.push({ x: Math.cos(an) * d, y: Math.sin(an) * d, w1: .6 + r() * 1.2, w2: .5 + r() * 1.1, ph: r() * TAU, delay: r() }); }
+  return a; })();
+// ...and packed shoulder to shoulder as pomegranate seeds
+const ARILS = (() => { const pts = [], s = 22.5;
+  for (let row = -8; row <= 8; row++) for (let col = -8; col <= 8; col++) {
+    const x = col * s + (row % 2 ? s / 2 : 0), y = row * s * .87; pts.push({ x, y, d: Math.hypot(x, y) }); }
+  pts.sort((a, b) => a.d - b.d);
+  return pts.slice(0, N).map((p, i) => ({ x: p.x / R1, y: p.y / R1, rot: (i * 1.7) % 1.2 - .6 })); })();
+{ // pair specks with seeds by angle so they flow inward without crossing
+  const ang = p => Math.atan2(p.y, p.x);
+  const ps = PARTS.map((p, i) => i).sort((a, b) => ang(PARTS[a]) - ang(PARTS[b]));
+  const as = ARILS.map((p, i) => i).sort((a, b) => ang(ARILS[a]) - ang(ARILS[b]));
+  ps.forEach((pi, k) => PARTS[pi].to = ARILS[as[k]]);
+}
+const WM_SEEDS = (() => { const r = rng(11), s = [];
+  for (let i = 0; i < 13; i++) s.push({ a: i / 13 * TAU + r() * .2, d: .6 + r() * .07 });
+  for (let i = 0; i < 6; i++) s.push({ a: i / 6 * TAU + .5, d: .33 });
+  return s; })();
+const BUBBLES = (() => { const r = rng(21), b = []; for (let i = 0; i < 14; i++) b.push({ x: (r() - .5) * 1.3, r: 6 + r() * 16, sp: .05 + r() * .06, o: r() }); return b; })();
+
+const morphAt = t => eInOut(P(t, T.morph, T.morphLen));
+const radiusAt = t => lerp(R0, R1, morphAt(t));
+const densityAt = t => R0 / radiusAt(t);
+const PULSES = (() => { const out = []; let ph = 0;
+  for (let t = 4.0; t < T.bloom; t += 1 / 240) { const k = densityAt(t); ph += (1 / 240) * lerp(.55, 3.0, (k - 1) / 1.95); if (ph >= 1) { ph -= 1; out.push(t); } }
+  return out; })();
+
+// ---------- drawing helpers ----------
+function glowStroke(drawPath, color, w, a) {
+  if (a <= 0) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  drawPath(); ctx.strokeStyle = `rgba(${color},${.07 * a})`; ctx.lineWidth = w * 7; ctx.stroke();
+  drawPath(); ctx.strokeStyle = `rgba(${color},${.16 * a})`; ctx.lineWidth = w * 3; ctx.stroke();
+  drawPath(); ctx.strokeStyle = `rgba(${color},${.8 * a})`; ctx.lineWidth = w; ctx.stroke();
+  ctx.restore();
+}
+function comet(cx, cy, r, head, len, a, w = 3.2, col = '225,255,140') {
+  if (a <= 0) return;
+  const n = 28;
+  ctx.save(); ctx.lineCap = 'round'; ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < n; i++) {
+    const a0 = head - len * (i + 1) / n, a1 = head - len * i / n, k = 1 - i / n;
+    ctx.beginPath(); ctx.arc(cx, cy, r, Math.min(a0, a1), Math.max(a0, a1));
+    ctx.strokeStyle = `rgba(${col},${a * k * k})`; ctx.lineWidth = w * (0.4 + .6 * k); ctx.stroke();
+  }
+  glow(SPR_LIME, cx + Math.cos(head) * r, cy + Math.sin(head) * r, 70, a);
+  ctx.restore();
+}
+function crownPath(x, y, R, s) { // pomegranate calyx sitting on the top of the fruit
+  const w = R * .34 * s, h = R * .3 * s, b = y - R * .96;
+  ctx.beginPath();
+  ctx.moveTo(x - w * .55, b + 2);
+  ctx.lineTo(x - w, b - h); ctx.lineTo(x - w * .45, b - h * .55); ctx.lineTo(x, b - h * 1.12);
+  ctx.lineTo(x + w * .45, b - h * .55); ctx.lineTo(x + w, b - h); ctx.lineTo(x + w * .55, b + 2);
+}
+function aril(x, y, r, rot, a) {
+  if (a <= 0) return;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.globalAlpha = a;
+  const g = ctx.createRadialGradient(-r * .3, -r * .35, r * .1, 0, 0, r * 1.1);
+  g.addColorStop(0, '#FF8A9A'); g.addColorStop(.55, '#E2294C'); g.addColorStop(1, '#7A0A26');
+  ctx.beginPath(); ctx.ellipse(0, 0, r * .84, r, 0, 0, TAU); ctx.fillStyle = g; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-r * .26, -r * .36, r * .2, r * .28, -.4, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fill();
+  ctx.restore();
+}
+
+// letter-by-letter reveal; returns nothing, draws centred text
+function softText(str, x, y, font, color, tin, tout, t, opt = {}) {
+  const ls = opt.ls || 0, stag = opt.stag ?? .022;
+  if (t < tin || t > tout + .6) return;
+  ctx.save(); ctx.font = font; ctx.textBaseline = 'alphabetic';
+  const ws = [...str].map(ch => ctx.measureText(ch).width + ls);
+  const total = ws.reduce((a, b) => a + b, 0) - ls;
+  let cx = x - total / 2;
+  const out = eInOut(P(t, tout, .5));
+  [...str].forEach((ch, i) => {
+    const a = eOut3(P(t, tin + i * stag, .55)) * (1 - out);
+    if (a > 0) {
+      ctx.globalAlpha = a; ctx.fillStyle = color;
+      ctx.fillText(ch, cx, y + (1 - a) * 16 - out * 10);
+    }
+    cx += ws[i];
+  });
+  ctx.restore();
+}
+
+// ---------- the dark act ----------
+function darkScene(t) {
+  const m = morphAt(t), k = densityAt(t), kk = (k - 1) / 1.95;
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#03170F'); bg.addColorStop(.55, '#06382A'); bg.addColorStop(1, '#0E6F4C');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const breathe = .85 + .15 * Math.sin(t * 1.1);
+  let g = ctx.createRadialGradient(W / 2, H * 1.02, 50, W / 2, H * 1.02, H * .75);
+  g.addColorStop(0, `rgba(70,230,160,${.42 * breathe})`); g.addColorStop(1, 'rgba(70,230,160,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // ambient light around the fruit: soft coral for the melon, deep rose once it's a pomegranate
+  const fruitIn = eOut3(P(t, 3.2, 1.0));
+  const amb = lerp3([255, 120, 130], [255, 60, 95], m);
+  g = ctx.createRadialGradient(C0.x, C0.y, 0, C0.x, C0.y, 820);
+  g.addColorStop(0, `rgba(${amb},${(.07 + .13 * kk) * fruitIn})`); g.addColorStop(1, `rgba(${amb},0)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  const cam = lerp(1, 1.07, eInOut2(P(t, 0, T.bloom)));
+  ctx.translate(C0.x, C0.y); ctx.scale(cam, cam); ctx.translate(-C0.x, -C0.y);
+
+  // --- four great rings collapse into one: the melon's rind ---
+  const conv = eInOut(P(t, T.converge, 1.8));
+  RINGS.forEach((ring, i) => {
+    const draw = eOut3(P(t, .1 + i * .18, 1.6));
+    if (draw <= 0) return;
+    const alpha = 1 - P(t, 3.6, .6);
+    if (alpha <= 0) return;
+    const cx = lerp(ring.x, C0.x, conv), cy = lerp(ring.y, C0.y, conv), r = lerp(ring.r, R0, conv);
+    const a0 = ring.a0 + t * .04 * Math.sign(ring.sp);
+    glowStroke(() => { ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + TAU * draw); }, '190,245,150', 2, alpha * .85);
+    comet(cx, cy, r, ring.a0 + 1.2 + t * ring.sp * (1 + conv * 2.5), .55 - conv * .2, alpha * draw * .9);
+    const dx = cx + Math.cos(ring.dot) * r, dy = cy + Math.sin(ring.dot) * r;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; glow(SPR_LIME, dx, dy, 46, alpha * draw); ctx.restore();
+    ctx.beginPath(); ctx.arc(dx, dy, 5, 0, TAU); ctx.fillStyle = `rgba(240,255,200,${alpha * draw})`; ctx.fill();
+  });
+
+  if (fruitIn > 0) {
+    const R = radiusAt(t);
+    // ghost: where the watermelon used to be
+    const ghost = P(t, T.morph + .3, .8);
+    if (ghost > 0) {
+      ctx.save(); ctx.setLineDash([2, 11]); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(C0.x, C0.y, R0, 0, TAU); ctx.strokeStyle = `rgba(200,250,170,${.32 * ghost})`; ctx.lineWidth = 2.5; ctx.stroke(); ctx.restore();
+      const da = -1.2 + t * .5;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; glow(SPR_LIME, C0.x + Math.cos(da) * R0, C0.y + Math.sin(da) * R0, 44, ghost); ctx.restore();
+    }
+    // energy pulses: they quicken as the fruit gets denser
+    for (const pt of PULSES) {
+      const d = t - pt; if (d < 0 || d > 1.4) continue;
+      const rr = radiusAt(pt) + eOut3(d / 1.4) * 320, a = (1 - d / 1.4) * .45 * fruitIn;
+      glowStroke(() => { ctx.beginPath(); ctx.arc(C0.x, C0.y, rr, 0, TAU); }, lerp3([200, 255, 150], [255, 150, 170], m).join(','), 1.5, a);
+    }
+
+    // pale rind band (melon) / pith (pomegranate) between skin and flesh
+    ctx.beginPath(); ctx.arc(C0.x, C0.y, R * .985, 0, TAU);
+    ctx.fillStyle = `rgba(${lerp3([215, 250, 200], [250, 215, 205], m)},${.3 * fruitIn})`; ctx.fill();
+    // flesh
+    const fleshR = R * .86;
+    g = ctx.createRadialGradient(C0.x - R * .25, C0.y - R * .3, R * .05, C0.x, C0.y, fleshR);
+    const fA = lerp3([255, 150, 158], [160, 28, 60], m), fB = lerp3([236, 64, 92], [72, 8, 30], m);
+    g.addColorStop(0, `rgba(${fA},${.93 * fruitIn})`);
+    g.addColorStop(1, `rgba(${fB},${.93 * fruitIn})`);
+    ctx.beginPath(); ctx.arc(C0.x, C0.y, fleshR, 0, TAU); ctx.fillStyle = g; ctx.fill();
+    // pith / pale band between flesh and rind
+    glowStroke(() => { ctx.beginPath(); ctx.arc(C0.x, C0.y, R * .9, 0, TAU); }, lerp3([225, 255, 205], [255, 220, 200], m).join(','), 1.4, fruitIn * .75);
+    // rind: green melon rind turning into crimson pomegranate skin
+    const rind = lerp3([110, 225, 130], [235, 60, 90], m).join(',');
+    glowStroke(() => { ctx.beginPath(); ctx.arc(C0.x, C0.y, R, 0, TAU); }, rind, lerp(4, 3, m), fruitIn);
+    glowStroke(() => { ctx.beginPath(); ctx.arc(C0.x, C0.y, R * .955, 0, TAU); }, rind, 1.2, fruitIn * .6 * (1 - m));
+
+    // melon seeds: they dissolve as it turns into a pomegranate
+    const seedA = eOut3(P(t, 3.7, .6)) * (1 - eInOut(P(t, T.morph, .7)));
+    if (seedA > 0) for (const s of WM_SEEDS) {
+      ctx.save(); ctx.translate(C0.x + Math.cos(s.a) * R * s.d, C0.y + Math.sin(s.a) * R * s.d); ctx.rotate(s.a + Math.PI / 2);
+      const sz = R * .05 * seedA;
+      ctx.beginPath(); ctx.moveTo(0, -sz * 1.2); ctx.quadraticCurveTo(sz * .85, sz * .5, 0, sz); ctx.quadraticCurveTo(-sz * .85, sz * .5, 0, -sz * 1.2);
+      ctx.fillStyle = `rgba(10,26,18,${.85 * seedA})`; ctx.fill();
+      ctx.strokeStyle = `rgba(255,210,210,${.35 * seedA})`; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.restore();
+    }
+    // water: slow bubbles drifting up through the melon
+    const bubA = eOut3(P(t, 3.8, .8)) * (1 - P(t, T.morph, .8));
+    if (bubA > 0) {
+      ctx.save(); ctx.beginPath(); ctx.arc(C0.x, C0.y, fleshR, 0, TAU); ctx.clip();
+      for (const b of BUBBLES) {
+        const y = C0.y + fleshR - ((t * b.sp + b.o) % 1) * fleshR * 2;
+        const x = C0.x + b.x * fleshR * .75 + Math.sin(t * 1.5 + b.o * 9) * 8;
+        ctx.beginPath(); ctx.arc(x, y, b.r, 0, TAU);
+        ctx.strokeStyle = `rgba(255,235,235,${.45 * bubA})`; ctx.lineWidth = 1.6; ctx.stroke();
+        ctx.fillStyle = `rgba(255,255,255,${.05 * bubA})`; ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // energy: scattered and faint in the melon; packed and blazing as pomegranate seeds
+    ctx.save();
+    for (const p of PARTS) {
+      const a = eOut3(P(t, 3.6 + p.delay * .8, .8));
+      if (a <= 0) continue;
+      const pm = eInOut(P(t, T.morph + p.delay * .5, T.morphLen - .5));
+      const jx = Math.sin(t * p.w1 + p.ph) * .05 * (1 - pm), jy = Math.cos(t * p.w2 + p.ph) * .05 * (1 - pm);
+      const sx = (p.x + jx) * R, sy = (p.y + jy) * R;
+      const tx = p.to.x * R, ty = p.to.y * R;
+      const x = C0.x + lerp(sx, tx, pm), y = C0.y + lerp(sy, ty, pm);
+      const tw = .75 + .25 * Math.sin(t * (2.5 + pm * 5) + p.ph);
+      ctx.globalCompositeOperation = 'lighter';
+      glow(SPR_LIME, x, y, 30, a * .45 * (1 - pm) * tw);       // a faint speck
+      glow(SPR_RUBY, x, y, 46 * (R / R1) * .5, a * pm * .55 * tw);
+      ctx.globalCompositeOperation = 'source-over';
+      aril(x, y, 10.5 * (R / R1) * lerp(.4, 1, pm), p.to.rot, a * eOut3(pm));
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    glow(SPR_CORAL, C0.x, C0.y, R * 3.4, fruitIn * (.05 + .35 * kk));
+    glow(SPR_WHITE, C0.x, C0.y, R * 1.5, fruitIn * .35 * kk * kk * (.85 + .15 * Math.sin(t * 6)));
+    ctx.restore();
+
+    // pomegranate crown grows once it's small
+    const cr = eBack(P(t, T.morph + T.morphLen - .7, .7), 2);
+    if (cr > 0) {
+      crownPath(C0.x, C0.y, R, cr); ctx.fillStyle = `rgba(110,15,40,${.85 * cr})`; ctx.fill();
+      glowStroke(() => crownPath(C0.x, C0.y, R, cr), '255,120,140', 2.2, cr);
+    }
+    // tight, fast orbits once it's dense
+    const orb = P(t, T.morph + T.morphLen - .2, .6);
+    if (orb > 0) { comet(C0.x, C0.y, R + 46, t * 4.2, .9, orb * .9, 2.6); comet(C0.x, C0.y, R + 76, -t * 3.1 + 2, .7, orb * .7, 2.2, '255,170,180'); }
+  }
+  ctx.restore();
+
+  // --- words: few, small, quiet ---
+  softText('Size lies about energy.', W / 2, C0.y + 20, `italic 82px ${SERIF}`, 'rgba(232,255,210,.95)', .6, 2.15, t, { stag: .03 });
+  softText('BIG PORTION', W / 2, 300, `600 27px ${SANS}`, 'rgba(190,240,170,.7)', 4.0, 5.95, t, { ls: 9 });
+  softText('Like a watermelon.', W / 2, 382, `italic 80px ${SERIF}`, 'rgba(240,255,225,.96)', 4.15, 5.95, t);
+  softText('Lots of volume. Mostly water.', W / 2, 446, `500 35px ${SANS}`, 'rgba(210,240,200,.62)', 4.5, 5.95, t, { stag: .014 });
+  softText('SMALL PORTION', W / 2, 300, `600 27px ${SANS}`, 'rgba(255,190,200,.75)', 8.0, 9.95, t, { ls: 9 });
+  softText('Like a pomegranate.', W / 2, 382, `italic 80px ${SERIF}`, 'rgba(255,240,240,.97)', 8.15, 9.95, t);
+  softText('Every gram packed.', W / 2, 446, `500 35px ${SANS}`, 'rgba(255,215,220,.66)', 8.5, 9.95, t, { stag: .018 });
+}
+
+// ---------- the light act ----------
+const PM = { x: 770, y: 1060 };
+function lightScene(t) {
+  const u = t - T.bloom;
+  const bg = ctx.createLinearGradient(W, 0, 0, H);
+  bg.addColorStop(0, '#FBFDF0'); bg.addColorStop(.55, '#EAF6D6'); bg.addColorStop(1, '#D2EDB8');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  let g = ctx.createRadialGradient(W * .85, H * .2, 0, W * .85, H * .2, 900);
+  g.addColorStop(0, 'rgba(255,255,235,.9)'); g.addColorStop(1, 'rgba(255,255,235,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  const drift = Math.sin(t * .6) * 8;
+  // the watermelon, now a soft airy slice: big, light, diffuse
+  const bx = -160, by = 1000 + drift, grow = eOut5(P(u, 0, 1.2)), rr = 640 * lerp(.9, 1, grow);
+  g = ctx.createRadialGradient(bx + 150, by - 60, 30, bx, by, rr);
+  g.addColorStop(0, 'rgba(255,190,185,.75)'); g.addColorStop(.72, 'rgba(250,200,190,.45)'); g.addColorStop(.86, 'rgba(240,245,220,.7)'); g.addColorStop(.9, 'rgba(190,228,150,.85)'); g.addColorStop(1, 'rgba(150,205,120,.9)');
+  ctx.save(); ctx.globalAlpha = grow; ctx.beginPath(); ctx.arc(bx, by, rr, 0, TAU); ctx.fillStyle = g; ctx.fill();
+  // a few faint seeds
+  for (const s of WM_SEEDS.slice(0, 13)) {
+    const x = bx + Math.cos(s.a) * rr * s.d, y = by + Math.sin(s.a) * rr * s.d;
+    if (x < 10) continue;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(s.a + Math.PI / 2);
+    ctx.beginPath(); ctx.ellipse(0, 0, 6, 11, 0, 0, TAU); ctx.fillStyle = 'rgba(60,40,40,.22)'; ctx.fill(); ctx.restore();
+  }
+  ctx.restore();
+  const line = eInOut(P(u, .15, 1.6));
+  if (line > 0) {
+    ctx.save(); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(bx, by, rr, -1.25, -1.25 + 2.5 * line); ctx.strokeStyle = 'rgba(40,95,55,.6)'; ctx.lineWidth = 1.8; ctx.stroke();
+    const lg = ctx.createLinearGradient(0, by, 0, by + rr);
+    lg.addColorStop(0, 'rgba(220,250,120,0)'); lg.addColorStop(1, 'rgba(220,250,120,.9)');
+    ctx.beginPath(); ctx.arc(bx, by, rr + 1, .2, .2 + 1.1 * line); ctx.strokeStyle = lg; ctx.lineWidth = 3; ctx.stroke();
+    ctx.restore();
+  }
+
+  // the pomegranate: small, deep, dense
+  const s = eBack(P(u, .1, .8), 1.8), py = PM.y + drift * .5, r = 70 * s;
+  if (r > 0) {
+    ctx.save();
+    g = ctx.createRadialGradient(PM.x, py + r * .9, 0, PM.x, py + r * .9, r * 1.6);
+    g.addColorStop(0, 'rgba(90,30,40,.25)'); g.addColorStop(1, 'rgba(90,30,40,0)');
+    ctx.fillStyle = g; ctx.fillRect(PM.x - r * 2, py - r, r * 4, r * 3.4);
+    crownPath(PM.x, py, r, 1); ctx.fillStyle = '#7C1430'; ctx.fill();
+    g = ctx.createRadialGradient(PM.x - r * .35, py - r * .4, r * .1, PM.x, py, r);
+    g.addColorStop(0, '#FF7A86'); g.addColorStop(.5, '#D92B4A'); g.addColorStop(1, '#7A0F2C');
+    ctx.beginPath(); ctx.arc(PM.x, py, r, 0, TAU); ctx.fillStyle = g; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(PM.x - r * .38, py - r * .42, r * .26, r * .12, -.6, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.fill();
+    ctx.fillStyle = 'rgba(255,220,225,.25)';
+    const rr2 = rng(3); for (let i = 0; i < 30; i++) { const an = rr2() * TAU, d = rr2() * r * .9; ctx.beginPath(); ctx.arc(PM.x + Math.cos(an) * d, py + Math.sin(an) * d, 1.6, 0, TAU); ctx.fill(); }
+    ctx.restore();
+    const halo = P(u, .6, .8);
+    if (halo > 0) for (let i = 0; i < 2; i++) {
+      const ph = (t * .7 + i * .5) % 1;
+      ctx.beginPath(); ctx.arc(PM.x, py, r + 14 + ph * 120, 0, TAU);
+      ctx.strokeStyle = `rgba(200,60,90,${.3 * (1 - ph) * halo})`; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+
+  // the line it all lands on
+  softText('SMALL DOG  ·  SMALL PORTION', W / 2, 300, `600 27px ${SANS}`, 'rgba(30,80,50,.62)', T.bloom + .7, 99, t, { ls: 8, stag: .015 });
+  softText('Bigger job per gram.', W / 2, 400, `italic 96px ${SERIF}`, '#17402A', T.bloom + 1.0, 99, t, { stag: .03 });
+}
+
+// ---------- frame ----------
+function draw(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  const L = eInOut(P(t, T.bloom + .2, .55));
+  if (L < 1) darkScene(t);
+  if (L > 0) { ctx.save(); ctx.globalAlpha = L; lightScene(t); ctx.restore(); }
+  const f = P(t, T.bloom, 1.0);
+  if (f > 0 && f < 1) {
+    const a = Math.sin(f * Math.PI), rr = 150 + eOut3(f) * 1800;
+    const g = ctx.createRadialGradient(C0.x, C0.y, 0, C0.x, C0.y, rr);
+    g.addColorStop(0, `rgba(255,250,240,${a})`); g.addColorStop(.5, `rgba(255,235,225,${a * .7})`); g.addColorStop(1, 'rgba(230,255,190,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.save(); ctx.globalAlpha = .06; ctx.globalCompositeOperation = 'overlay';
+  ctx.translate((t * 977) % 256, (t * 613) % 256);
+  ctx.fillStyle = ctx.createPattern(grain, 'repeat'); ctx.fillRect(-256, -256, W + 512, H + 512); ctx.restore();
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * .3, W / 2, H / 2, H * .8);
+  v.addColorStop(0, 'rgba(0,20,10,0)'); v.addColorStop(1, `rgba(0,20,10,${lerp(.35, .06, L)})`);
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- boot ----------
+window.ready = (async () => {
+  await Promise.all([document.fonts.load(`italic 80px ${SERIF}`), document.fonts.load(`600 27px ${SANS}`), document.fonts.load(`500 35px ${SANS}`)]);
+  await document.fonts.ready;
+  return document.fonts.check(`italic 80px ${SERIF}`);
+})();
+const renderPort = new URLSearchParams(location.search).get('render');
+if (renderPort) {
+  window.ready.then(async fonts => {
+    const api = `http://127.0.0.1:${renderPort}`;
+    const frames = await (await fetch(`${api}/info`, { method: 'POST', body: JSON.stringify({ fps: FPS, dur: DUR, fonts }) })).json();
+    for (const f of frames) {
+      try { draw(f / FPS); } catch (e) { await fetch(`${api}/error`, { method: 'POST', body: String(e.stack) }); }
+      const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+      await fetch(`${api}/frame`, { method: 'POST', body: blob });
+    }
+  });
+} else {
+  window.ready.then(() => { const t0 = performance.now(); const loop = () => { draw(((performance.now() - t0) / 1000) % (DUR + .8)); requestAnimationFrame(loop); }; loop(); });
+}
+</script>
+</body>
+</html>

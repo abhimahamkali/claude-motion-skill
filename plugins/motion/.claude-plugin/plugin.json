@@ -1,0 +1,7 @@
+{
+  "name": "motion",
+  "version": "1.0.0",
+  "description": "/motion [brief] → a premium 10–15 s motion graphic (9:16 MP4): visual analogy, light and gradients, subtle text. Rendered locally with headless Chrome + ffmpeg.",
+  "author": { "name": "Abhi Mahamkali" },
+  "keywords": ["motion graphics", "animation", "video", "reels", "explainer"]
+}

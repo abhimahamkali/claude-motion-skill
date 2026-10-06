@@ -1,5 +1,5 @@
-motion/
-stills/
+/motion/
+**/stills/
 *_sheet.png
 node_modules/
 .DS_Store

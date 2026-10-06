@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Motion Scene</title>
+<!-- Fonts: keep to one serif (statements) + one sans (labels). Swap freely, but keep display=block. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@500;600&display=block" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#0b0f0d;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  canvas{height:96vh;width:auto;max-width:96vw;object-fit:contain;box-shadow:0 20px 60px rgba(0,0,0,.5);border-radius:12px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* =====================================================================
+   CONFIG — format + length. 9:16 reel by default.
+   1080x1920 (9:16) · 1080x1350 (4:5) · 1080x1080 (1:1) · 1920x1080 (16:9)
+   ===================================================================== */
+const W = 1080, H = 1920, FPS = 30, DUR = 12;
+const SERIF = "'Instrument Serif', serif", SANS = "'Inter', sans-serif";
+
+const cv = document.getElementById('c'); cv.width = W; cv.height = H;
+const ctx = cv.getContext('2d');
+const TAU = Math.PI * 2;
+
+/* ============================ ENGINE ============================== */
+// --- timing: P(t, start, dur) -> 0..1 progress; compose with an ease ---
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const P = (t, s, d) => clamp((t - s) / d);
+const lerp = (a, b, k) => a + (b - a) * k;
+const lerp3 = (a, b, k) => a.map((v, i) => Math.round(lerp(v, b[i], k)));   // [r,g,b] colour mix
+const eOut3 = x => 1 - Math.pow(1 - x, 3);
+const eOut5 = x => 1 - Math.pow(1 - x, 5);
+const eIn3 = x => x * x * x;
+const eInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const eInOut2 = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+const eBack = (x, s = 1.7) => x <= 0 ? 0 : x >= 1 ? 1 : 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+// deterministic randomness: every frame must be reproducible, never use Math.random() in draw()
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// --- safe shapes: canvas throws on a negative radius, which stalls a render ---
+function circle(x, y, r) { ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, TAU); }
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, Math.max(0, w), Math.max(0, h), Math.max(0, Math.min(r, w / 2, h / 2))); }
+
+// --- film grain: stops gradients banding in H.264 ---
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+{ const g = grain.getContext('2d'), id = g.createImageData(256, 256), r = rng(7);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0); }
+
+// --- glow sprites: cheap soft light. Use with ctx.globalCompositeOperation = 'lighter' for additive bloom ---
+function sprite(r, g, b) {
+  const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, `rgba(${r},${g},${b},1)`); gr.addColorStop(.12, `rgba(${r},${g},${b},.75)`);
+  gr.addColorStop(.35, `rgba(${r},${g},${b},.18)`); gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return c;
+}
+const SPR = { mint: sprite(120, 245, 185), lime: sprite(220, 255, 120), white: sprite(255, 250, 235), rose: sprite(255, 90, 115), gold: sprite(255, 200, 110), sky: sprite(120, 200, 255) };
+function glow(spr, x, y, size, a) { if (a <= 0 || size <= 0) return; const o = ctx.globalAlpha; ctx.globalAlpha = o * Math.min(1, a); ctx.drawImage(spr, x - size / 2, y - size / 2, size, size); ctx.globalAlpha = o; }
+
+// --- luminous line: wide faint halo + core. drawPath() must build the path (beginPath + arc/lineTo) ---
+function glowStroke(drawPath, rgb, w, a) {
+  if (a <= 0) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  drawPath(); ctx.strokeStyle = `rgba(${rgb},${.07 * a})`; ctx.lineWidth = w * 7; ctx.stroke();
+  drawPath(); ctx.strokeStyle = `rgba(${rgb},${.16 * a})`; ctx.lineWidth = w * 3; ctx.stroke();
+  drawPath(); ctx.strokeStyle = `rgba(${rgb},${.8 * a})`; ctx.lineWidth = w; ctx.stroke();
+  ctx.restore();
+}
+// --- a light comet travelling along a circle (head angle in radians, len = tail length in radians) ---
+function comet(cx, cy, r, head, len, a, w = 3, rgb = '225,255,140', spr = SPR.lime) {
+  if (a <= 0 || r <= 0) return;
+  const n = 28;
+  ctx.save(); ctx.lineCap = 'round'; ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < n; i++) {
+    const a0 = head - len * (i + 1) / n, a1 = head - len * i / n, k = 1 - i / n;
+    ctx.beginPath(); ctx.arc(cx, cy, r, Math.min(a0, a1), Math.max(a0, a1));
+    ctx.strokeStyle = `rgba(${rgb},${a * k * k})`; ctx.lineWidth = w * (0.4 + .6 * k); ctx.stroke();
+  }
+  glow(spr, cx + Math.cos(head) * r, cy + Math.sin(head) * r, 70, a);
+  ctx.restore();
+}
+// --- expanding ring pulse, born at time t0 ---
+function pulse(cx, cy, r0, grow, t, t0, life, rgb, a = .5) {
+  const d = t - t0; if (d < 0 || d > life) return;
+  glowStroke(() => circle(cx, cy, r0 + eOut3(d / life) * grow), rgb, 1.5, (1 - d / life) * a);
+}
+
+// --- text: letter-by-letter rise + fade in, soft fade out. Centred on x. ---
+// font e.g. `italic 80px ${SERIF}` or `600 26px ${SANS}`; opt.ls = letter spacing px; opt.stag = seconds per letter
+function softText(str, x, y, font, color, tin, tout, t, opt = {}) {
+  const ls = opt.ls || 0, stag = opt.stag ?? .022;
+  if (t < tin || t > tout + .6) return;
+  ctx.save(); ctx.font = font; ctx.textBaseline = 'alphabetic';
+  const chars = [...str], ws = chars.map(ch => ctx.measureText(ch).width + ls);
+  let cx = x - (ws.reduce((a, b) => a + b, 0) - ls) / 2;
+  const out = eInOut(P(t, tout, .5));
+  chars.forEach((ch, i) => {
+    const a = eOut3(P(t, tin + i * stag, .55)) * (1 - out);
+    if (a > 0) { ctx.globalAlpha = a; ctx.fillStyle = color; ctx.fillText(ch, cx, y + (1 - a) * 16 - out * 10); }
+    cx += ws[i];
+  });
+  ctx.restore();
+}
+// --- a quiet three-part caption: SMALL CAPS LABEL / Serif italic line / sans subline ---
+function caption(label, line, sub, y, tin, tout, t, col = { label: 'rgba(190,240,170,.7)', line: 'rgba(240,255,225,.96)', sub: 'rgba(210,240,200,.62)' }) {
+  if (label) softText(label, W / 2, y, `600 27px ${SANS}`, col.label, tin, tout, t, { ls: 9 });
+  if (line) softText(line, W / 2, y + 82, `italic 80px ${SERIF}`, col.line, tin + .15, tout, t);
+  if (sub) softText(sub, W / 2, y + 146, `500 35px ${SANS}`, col.sub, tin + .5, tout, t, { stag: .014 });
+}
+
+// --- backgrounds ---
+function bgDark(t, top = '#03170F', mid = '#06382A', bot = '#0E6F4C', glowRGB = '70,230,160') {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, top); bg.addColorStop(.55, mid); bg.addColorStop(1, bot);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(W / 2, H * 1.02, 50, W / 2, H * 1.02, H * .75);
+  g.addColorStop(0, `rgba(${glowRGB},${.42 * (.85 + .15 * Math.sin(t * 1.1))})`); g.addColorStop(1, `rgba(${glowRGB},0)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+function bgLight(c0 = '#FBFDF0', c1 = '#EAF6D6', c2 = '#D2EDB8') {
+  const bg = ctx.createLinearGradient(W, 0, 0, H);
+  bg.addColorStop(0, c0); bg.addColorStop(.55, c1); bg.addColorStop(1, c2);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(W * .85, H * .2, 0, W * .85, H * .2, Math.max(W, H) * .5);
+  g.addColorStop(0, 'rgba(255,255,235,.9)'); g.addColorStop(1, 'rgba(255,255,235,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+// --- radial flash used to cut between acts ---
+function bloom(cx, cy, t, t0, dur = 1, rgb0 = '255,250,240', rgb1 = '235,255,200') {
+  const f = P(t, t0, dur); if (f <= 0 || f >= 1) return;
+  const a = Math.sin(f * Math.PI), r = 150 + eOut3(f) * Math.max(W, H);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  g.addColorStop(0, `rgba(${rgb0},${a})`); g.addColorStop(.5, `rgba(${rgb1},${a * .7})`); g.addColorStop(1, `rgba(${rgb1},0)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+// --- always the last thing drawn: moving grain + vignette ---
+function finishFrame(t, vignette = .3) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.save(); ctx.globalAlpha = .06; ctx.globalCompositeOperation = 'overlay';
+  ctx.translate((t * 977) % 256, (t * 613) % 256);
+  ctx.fillStyle = ctx.createPattern(grain, 'repeat'); ctx.fillRect(-256, -256, W + 512, H + 512); ctx.restore();
+  const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .5, W / 2, H / 2, Math.max(W, H) * .8);
+  v.addColorStop(0, 'rgba(0,20,10,0)'); v.addColorStop(1, `rgba(0,20,10,${vignette})`);
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+/* ============================= SCENE ===============================
+   Replace everything in this section. draw(t) must be a pure function
+   of t (seconds): no state carried between frames, no Math.random().
+   Demo: a loose orb of light compresses — same light, smaller space.
+   ===================================================================== */
+const C = { x: W / 2, y: H * .52 };
+const DOTS = (() => { const r = rng(42), a = []; for (let i = 0; i < 60; i++) { const d = Math.sqrt(r()) * .82, an = r() * TAU; a.push({ x: Math.cos(an) * d, y: Math.sin(an) * d, ph: r() * TAU }); } return a; })();
+
+function draw(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  bgDark(t);
+
+  const squeeze = eInOut(P(t, 4.5, 2.6));
+  const R = lerp(360, 120, squeeze) * eBack(P(t, 1.8, 1.0), 1.4);
+  const heat = squeeze;
+
+  if (R > 0) {
+    glowStroke(() => circle(C.x, C.y, R), '200,255,160', 2.4, 1);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const d of DOTS) {
+      const tw = .75 + .25 * Math.sin(t * (2 + heat * 6) + d.ph);
+      const x = C.x + d.x * R, y = C.y + d.y * R;
+      glow(SPR.lime, x, y, 34, (.35 + .65 * heat) * tw);
+      glow(SPR.white, x, y, 14, heat * tw);
+    }
+    glow(SPR.lime, C.x, C.y, R * 3.4, .08 + .4 * heat);
+    ctx.restore();
+    comet(C.x, C.y, R + 40, t * (1.5 + heat * 3), .8, P(t, 2.2, .6));
+  }
+  caption('SAME LIGHT', 'Less space.', 'Every point burns brighter.', 300, 7.4, 11.2, t);
+  softText('Density, in light.', C.x, C.y + 20, `italic 84px ${SERIF}`, 'rgba(232,255,210,.95)', .4, 1.7, t, { stag: .03 });
+
+  finishFrame(t);
+}
+
+/* ============================= BOOT ================================
+   Preview: open this file in a browser (loops).
+   Render:  node render.mjs scene.html   (adds ?render=<port>)
+   ===================================================================== */
+window.ready = (async () => {
+  await Promise.all([document.fonts.load(`italic 80px ${SERIF}`), document.fonts.load(`600 27px ${SANS}`), document.fonts.load(`500 35px ${SANS}`)]);
+  await document.fonts.ready;
+  return document.fonts.check(`italic 80px ${SERIF}`);
+})();
+const renderPort = new URLSearchParams(location.search).get('render');
+if (renderPort) {
+  window.ready.then(async fonts => {
+    const api = `http://127.0.0.1:${renderPort}`;
+    const frames = await (await fetch(`${api}/info`, { method: 'POST', body: JSON.stringify({ fps: FPS, dur: DUR, w: W, h: H, fonts }) })).json();
+    for (const f of frames) {
+      try { draw(f / FPS); } catch (e) { await fetch(`${api}/error`, { method: 'POST', body: `t=${(f / FPS).toFixed(2)}s\n${e.stack}` }); return; }
+      const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+      await fetch(`${api}/frame`, { method: 'POST', body: blob });
+    }
+  });
+} else {
+  window.ready.then(() => { const t0 = performance.now(); const loop = () => { draw(((performance.now() - t0) / 1000) % (DUR + .8)); requestAnimationFrame(loop); }; loop(); });
+}
+</script>
+</body>
+</html>
