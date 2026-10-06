@@ -14,9 +14,13 @@ https://github.com/abhimahamkali/claude-motion-skill/raw/main/plugins/motion/ski
 
 ## Install
 
-You can install it as a plugin or copy it in as a standalone skill.
+### One command (recommended)
+```bash
+npx skills add abhimahamkali/claude-motion-skill -g
+```
+Restart Claude Code and run `/motion <your brief>`. The `-g` flag installs it for every project; leave it off to install into the current project only.
 
-### As a plugin (recommended)
+### As a Claude Code plugin
 Inside Claude Code:
 ```
 /plugin marketplace add abhimahamkali/claude-motion-skill
