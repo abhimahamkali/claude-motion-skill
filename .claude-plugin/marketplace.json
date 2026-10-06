@@ -1,0 +1,18 @@
+{
+  "name": "claude-motion",
+  "owner": { "name": "Abhi Mahamkali" },
+  "metadata": {
+    "description": "Motion graphics for Claude Code: describe an idea, get a 10–15 second MP4.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "motion",
+      "source": "./plugins/motion",
+      "description": "/motion [brief] → a premium 10–15 s motion graphic (9:16 MP4) built on canvas and rendered with headless Chrome + ffmpeg.",
+      "version": "1.0.0",
+      "category": "design",
+      "keywords": ["motion graphics", "animation", "video", "reels", "explainer"]
+    }
+  ]
+}

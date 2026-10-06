@@ -1,0 +1,6 @@
+motion/
+stills/
+*_sheet.png
+node_modules/
+.DS_Store
+Thumbs.db
